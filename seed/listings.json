@@ -1,0 +1,72 @@
+[
+  {
+    "_id": "hist_rgb_001",
+    "product_name": "RGB Gaming Desk Lamp Pro",
+    "category": "lighting/rgb-desk",
+    "launched_at": "2026-02-14",
+    "launch_price": 39.00,
+    "outcome": "underperformed",
+    "units_30d": 47,
+    "bounce_rate": 0.71,
+    "copy_style": "gaming-aggressive",
+    "thumbnail_style": "neon-saturated",
+    "notes": "Positioned as premium gaming accessory but priced above customer expectation for desk-tier RGB. Bounce rate spiked on price reveal. Reviews mentioned 'feels like a $25 product at $39'.",
+    "embedding_source": "Premium RGB desk lamp targeted at gamers with multiple lighting modes, music sync, and aggressive RGB-forward branding. Marketed as a gaming setup centerpiece at $39."
+  },
+  {
+    "_id": "hist_rgb_002",
+    "product_name": "Ambient LED Strip Bar",
+    "category": "lighting/rgb-desk",
+    "launched_at": "2026-01-22",
+    "launch_price": 27.00,
+    "outcome": "strong",
+    "units_30d": 312,
+    "bounce_rate": 0.34,
+    "copy_style": "ambient-productivity",
+    "thumbnail_style": "warm-lifestyle",
+    "notes": "Sweet spot pricing for desk-tier RGB. Copy focused on ambient mood, productivity, and warm-light comfort rather than gaming. Strong conversion, repeat buyers.",
+    "embedding_source": "Ambient LED bar for desks emphasizing warm lighting, productivity, and mood. Soft positioning, lifestyle photography, priced at $27."
+  },
+  {
+    "_id": "hist_rgb_003",
+    "product_name": "Studio RGB Floor Lamp",
+    "category": "lighting/rgb-room",
+    "launched_at": "2026-03-08",
+    "launch_price": 89.00,
+    "outcome": "blockbuster",
+    "units_30d": 524,
+    "bounce_rate": 0.22,
+    "copy_style": "premium-minimalist",
+    "thumbnail_style": "editorial-clean",
+    "notes": "Premium-tier RGB floor lamp succeeded with minimalist copy and editorial photography. Higher price worked because positioning matched price tier. Influencer seeding helped.",
+    "embedding_source": "Premium floor-standing RGB lamp with minimalist editorial branding and app control. Targeted creators and content houses. Priced at $89."
+  },
+  {
+    "_id": "hist_rgb_004",
+    "product_name": "USB RGB Desk Light",
+    "category": "lighting/rgb-desk",
+    "launched_at": "2026-02-01",
+    "launch_price": 19.00,
+    "outcome": "underperformed",
+    "units_30d": 89,
+    "bounce_rate": 0.62,
+    "copy_style": "budget-functional",
+    "thumbnail_style": "marketplace-generic",
+    "notes": "Pricing too aggressive triggered 'cheap and disposable' perception. Reviews complained about flicker even though product was decent. Marketplace-style thumbnails hurt trust.",
+    "embedding_source": "Cheap USB-powered RGB desk light at $19 with generic marketplace branding. Functional copy, no lifestyle angle."
+  },
+  {
+    "_id": "hist_rgb_005",
+    "product_name": "Aurora Glow Smart Lamp",
+    "category": "lighting/rgb-desk",
+    "launched_at": "2026-04-03",
+    "launch_price": 35.00,
+    "outcome": "solid",
+    "units_30d": 218,
+    "bounce_rate": 0.41,
+    "copy_style": "smart-home-lifestyle",
+    "thumbnail_style": "warm-lifestyle",
+    "notes": "App control + ambient angle resonated. Priced between budget and premium tiers. Copy avoided gaming language entirely, focused on smart home integration.",
+    "embedding_source": "Smart RGB desk lamp with app control and ambient lighting modes. Smart-home and lifestyle positioning at $35."
+  }
+]
