@@ -1,0 +1,10 @@
+# Explicit Python build for Railway. Prevents Nixpacks from auto-detecting
+# the Next.js project under frontend/ and trying to build both.
+[phases.setup]
+nixPkgs = ["python311", "gcc"]
+
+[phases.install]
+cmds = ["python -m venv /opt/venv", ". /opt/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"]
+
+[start]
+cmd = ". /opt/venv/bin/activate && uvicorn backend.main:app --host 0.0.0.0 --port $PORT"

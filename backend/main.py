@@ -16,7 +16,9 @@ timeline as they arrive.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import tempfile
 import time
 import sys
 from pathlib import Path
@@ -28,18 +30,50 @@ from pydantic import BaseModel
 from pymongo import MongoClient
 from sse_starlette.sse import EventSourceResponse
 
-# repo root so we can import agent.*
+# ── repo root so we can import agent.* ───────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
+
+# ── GCP creds bootstrap ──────────────────────────────────────────────────────
+# In prod (Railway) we inject the service-account JSON as an env var.
+# Materialize it to a temp file and point GOOGLE_APPLICATION_CREDENTIALS at it
+# so google-genai / vertex SDKs pick it up via ADC.
+def _bootstrap_gcp_credentials() -> None:
+    raw = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        # Local dev: GOOGLE_APPLICATION_CREDENTIALS already points to ./secrets/...
+        return
+    try:
+        creds = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"GCP_SERVICE_ACCOUNT_JSON is not valid JSON: {e}") from e
+    fd, path = tempfile.mkstemp(suffix=".json", prefix="gcp-helix-")
+    with os.fdopen(fd, "w") as f:
+        json.dump(creds, f)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+    if "project_id" in creds and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = creds["project_id"]
+
+
+_bootstrap_gcp_credentials()
+
 from agent.mission import run_mission  # noqa: E402
 
-
+# ── app ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Helix API", version="0.1.0")
+
+
+def _parse_origins(value: str | None) -> list[str]:
+    if not value:
+        return ["http://localhost:3000"]
+    return [o.strip() for o in value.split(",") if o.strip()]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")],
+    allow_origins=_parse_origins(os.environ.get("FRONTEND_ORIGIN")),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,11 +96,17 @@ class StartMissionResponse(BaseModel):
 # ── endpoints ───────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "service": "helix-backend",
+        "model": os.environ.get("GEMINI_MODEL", "unknown"),
+    }
 
 
 @app.post("/api/missions", response_model=StartMissionResponse)
-def start_mission(req: StartMissionRequest, background: BackgroundTasks) -> StartMissionResponse:
+def start_mission(
+    req: StartMissionRequest, background: BackgroundTasks
+) -> StartMissionResponse:
     mission_id = f"run_{int(time.time() * 1000)}"
     background.add_task(run_mission, product_brief=req.brief, mission_id=mission_id)
     return StartMissionResponse(mission_id=mission_id)
@@ -94,12 +134,20 @@ def get_mission(mission_id: str) -> dict:
     return doc
 
 
+# SSE response headers that defeat upstream proxy buffering on Railway/Vercel.
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
 @app.get("/api/missions/{mission_id}/stream")
 async def stream_mission(mission_id: str):
     """SSE that tails agent_runs.{id}.events.
 
-    Polls Mongo every 300ms for new events. Cheaper than change streams and
-    perfectly cinematic on this scale. Closes when status == 'complete'.
+    Polls Mongo every 100ms for new events. Closes when status == 'complete'.
+    sse-starlette's ping= keeps the connection warm through idle proxies.
     """
 
     async def generator():
@@ -116,7 +164,6 @@ async def stream_mission(mission_id: str):
 
             events = doc.get("events", [])
             for ev in events[last_count:]:
-                # convert datetime → iso for JSON
                 ev_out = {
                     "kind": ev.get("kind"),
                     "payload": ev.get("payload"),
@@ -133,7 +180,9 @@ async def stream_mission(mission_id: str):
 
         yield {"event": "timeout", "data": "stream timeout"}
 
-    return EventSourceResponse(generator())
+    # ping=15 sends a comment heartbeat every 15s during idle waits, keeping
+    # proxies (Railway, Cloudflare, etc.) from closing the connection.
+    return EventSourceResponse(generator(), headers=_SSE_HEADERS, ping=15)
 
 
 @app.get("/api/memory")
@@ -151,7 +200,6 @@ def list_memory(limit: int = 20) -> list[dict]:
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 def _json(obj) -> str:
-    import json
     return json.dumps(obj, default=str)
 
 
@@ -160,6 +208,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "backend.main:app",
         host=os.environ.get("BACKEND_HOST", "0.0.0.0"),
-        port=int(os.environ.get("BACKEND_PORT", "8000")),
-        reload=True,
+        port=int(os.environ.get("PORT", os.environ.get("BACKEND_PORT", "8000"))),
+        reload=False,
     )
