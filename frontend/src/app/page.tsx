@@ -383,7 +383,10 @@ export default function MissionControl() {
       </aside>
 
       {/* CENTER — TIMELINE */}
-      <main className="flex h-screen flex-col">
+      {/* min-w-0 lets the column shrink past intrinsic content width
+          (otherwise a long <pre> like publish_to_shopify args pushes the
+          grid past the viewport and we get a body-level horizontal scroll). */}
+      <main className="flex h-screen min-w-0 flex-col">
         <div className="grid grid-cols-4 border-b border-[var(--border)] bg-[var(--bg-1)]">
           <Metric label="Missions Run" value={String(metrics.total)} />
           <Metric label="Completed" value={String(metrics.complete)} />
