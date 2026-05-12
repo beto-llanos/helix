@@ -4,12 +4,14 @@
 
 ### Autonomous Commerce Operations Runtime
 
-*An AI agent that doesn't generate listings. It operates a commerce business.*
+*An agent that learns from prior product launches and uses that operational memory during live decisions.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Built with Gemini 3](https://img.shields.io/badge/Built%20with-Gemini%203-4285F4.svg)](https://deepmind.google/technologies/gemini/)
-[![MongoDB Atlas](https://img.shields.io/badge/Memory-MongoDB%20Atlas-00ED64.svg)](https://www.mongodb.com/atlas)
-[![Vertex AI Agent Builder](https://img.shields.io/badge/Runtime-Vertex%20Agent%20Builder-4285F4.svg)](https://cloud.google.com/products/agent-builder)
+[![Gemini 2.5 Pro](https://img.shields.io/badge/Reasoning-Gemini%202.5%20Pro-4285F4.svg)](https://deepmind.google/technologies/gemini/)
+[![MongoDB Atlas](https://img.shields.io/badge/Memory-MongoDB%20Atlas%20Vector%20Search-00ED64.svg)](https://www.mongodb.com/atlas)
+[![MongoDB MCP](https://img.shields.io/badge/MCP-mongodb--mcp--server-00ED64.svg)](https://github.com/mongodb-js/mongodb-mcp-server)
+
+**Live:** [helix-tau-two.vercel.app](https://helix-tau-two.vercel.app) · **Track:** Google Cloud Rapid Agent Hackathon — MongoDB
 
 </div>
 
@@ -17,127 +19,170 @@
 
 ## What Helix is
 
-Helix is an autonomous commerce runtime. You hand it a product — a link, an image, an idea — and it executes the full launch mission: research, reasoning, generation, publication, and memory consolidation. Every decision is grounded in operational memory of past launches.
+Helix takes a product brief, retrieves similar past launches from MongoDB Atlas Vector Search, reasons through the pricing and positioning decision while citing those prior launches by name, publishes a real draft product to Shopify, and consolidates the new launch back into operational memory.
 
-It is **not** a listing generator. It is **not** a chatbot. It is an agent runtime that operates persistent commerce intelligence.
+The point is the second mission, not the first. Every run thickens the memory layer, and every subsequent run cites it. Watch the Mission Control timeline closely — past failures are referenced by name before the agent commits to a new price tier.
 
-> The wow moment is not that a product gets published.
-> The wow moment is the agent reasoning from its own operational history.
+## The mission loop
 
-## Why it exists
+Every Helix run streams these phases live to the UI:
 
-Sellers across LATAM lose hours per product translating ideas into polished, optimized, channel-ready listings. The work is repetitive, judgment-heavy, and impossible to outsource cleanly because every decision depends on context from past launches.
-
-Helix turns that workflow into an autonomous mission and lets the agent's own operational memory accumulate the judgment.
-
-## The Mission Loop
-
-Every Helix run executes five stages, fully visible in the Mission Control timeline.
-
-| Stage | What the agent does | Where state lives |
+| Phase | What happens | Tool / surface |
 |---|---|---|
-| **1. Ingestion** | Extract product context from URL / image / idea. | `mongo:product_context` |
-| **2. Market Research** | Lightweight real retrieval (Gemini grounding) + vector search over own listing memory. | `mongo:listings_memory` (Atlas Vector Search) |
-| **3. Listing Generation** | SEO title, description, tags, pricing, variants, positioning — with reasoning trace. | `mongo:agent_runs` |
-| **4. Publication** | Real publication to Shopify Admin API. | Shopify dev store |
-| **5. Memory Consolidation** | Embed and store the launch + decisions for future retrieval. | `mongo:listings_memory` |
+| **1. Recall** | Vector search over `listings_memory` for ~3 similar prior launches. | `recall_similar_launches` → MongoDB Atlas `$vectorSearch` |
+| **2. Reason** | Agent narrates the retrieved pattern, identifies which past attempts succeeded and which failed, decides on price + positioning. | Streaming `reasoning_delta` events via SSE |
+| **3. Publish** | Creates a real draft product on the Helix Shopify dev store. | `publish_to_shopify` → Shopify Admin API |
+| **4. Consolidate** | Embeds the new launch and upserts it into `listings_memory` so it informs future missions. | `save_mission_outcome` → MongoDB upsert |
 
-The agent emits state to MongoDB at every step. The frontend reacts via **Atlas change streams** — MongoDB is the live nervous system, not just storage.
+Mission events (`mission_start`, `reasoning_delta`, `tool_call`, `tool_result`, `mission_complete`) are appended to `agent_runs.{id}.events` and streamed to the UI over SSE.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Next.js (Vercel) — Mission Control                     │
-│  Timeline-first UI. No dashboards. No chat-centered.    │
-└────────────────┬────────────────────────────────────────┘
-                 │ MongoDB Atlas Change Streams
-                 ▼
-┌─────────────────────────────────────────────────────────┐
-│  Vertex AI Agent Builder (ADK) — The Agent Runtime      │
-│  Gemini 3 reasoning + Google Search grounding           │
-│  Tools: mongodb_mcp · shopify_publish · product_extract │
-└────────────────┬────────────────────────────────────────┘
-                 │
-                 ├─► MongoDB Atlas (operational memory + vector search)
-                 ├─► Shopify Admin API (action layer)
-                 └─► FastAPI (thin orchestration + auth)
+```text
+┌──────────────────────────────────────────────────────────────┐
+│  Next.js 16 (Vercel) — Mission Control                       │
+│  Timeline-first UI · streaming reasoning · memory cards      │
+│  Memory-reference highlighting · bidirectional hover         │
+└──────────────────────────┬───────────────────────────────────┘
+                           │ SSE (X-Accel-Buffering: no, ping=15)
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  FastAPI (Railway) — orchestration + event stream            │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Agent loop — Gemini 2.5 Pro (Vertex AI)                     │
+│  Streaming function calls · 4-tool surface · narration first │
+└──────┬──────────────────────────┬────────────────────────────┘
+       │                          │
+       ▼                          ▼
+┌──────────────────┐    ┌──────────────────────┐
+│ Shopify Admin    │    │ Operational memory   │
+│ (draft products) │    │ via swappable backend │
+└──────────────────┘    │ ┌──────────────────┐ │
+                        │ │ direct (pymongo) │ │ ← production default
+                        │ ├──────────────────┤ │
+                        │ │ mcp (stdio)      │ │ ← qualification demo
+                        │ └──────────────────┘ │
+                        └──────────┬───────────┘
+                                   ▼
+                        ┌──────────────────────┐
+                        │ MongoDB Atlas        │
+                        │ listings_memory      │
+                        │ + Vector Search idx  │
+                        │ + agent_runs (events)│
+                        └──────────────────────┘
 ```
 
-**Why ADK and not Conversational Agents:** the reasoning trace must be visible, not hidden behind chat turns.
-**Why change streams and not SSE:** they make MongoDB load-bearing in the architecture, not decorative.
-**Why a custom Next.js UI:** the cinematic mission flow is the product. Streamlit cannot deliver this.
+## MongoDB MCP integration
+
+Helix talks to the operational-memory collection through a swappable backend layer. The same `$vectorSearch` pipeline can travel over two transports:
+
+- **`direct`** — `pymongo` against Atlas. Production default on Railway.
+- **`mcp`** — official [`mongodb-mcp-server`](https://github.com/mongodb-js/mongodb-mcp-server) over stdio. Used for the MongoDB-track qualification demo.
+
+Switch with one env: `HELIX_MEMORY_BACKEND=direct|mcp` (default `direct`). The agent layer (`agent/tools.py`) keeps identical function signatures and docstrings; Gemini's function-call schema is unchanged. Full integration notes and measured latency in [`docs/mcp.md`](./docs/mcp.md).
+
+> Helix supports MongoDB MCP-backed operational memory and direct Atlas access through a single swappable layer. The public deployment runs the direct backend for reliability; the MCP path is exercised on the qualification demo and uses the same `$vectorSearch` pipeline through the official `mongodb-mcp-server`.
 
 ## Stack
 
 | Layer | Choice | Why |
 |---|---|---|
-| Frontend | Next.js 15 + TypeScript + Tailwind + shadcn/ui | Mission Control aesthetic |
-| Backend | FastAPI (Python) | Thin orchestration, async-friendly |
-| Agent Runtime | **Vertex AI Agent Builder (ADK)** | Hackathon requirement + reasoning visibility |
-| Reasoning | **Gemini 3** | Grounding + multimodal + reasoning depth |
-| Memory | **MongoDB Atlas + Atlas Vector Search** | Persistent operational memory |
-| MCP | **MongoDB MCP Server** | Required for MongoDB track |
-| Action layer | Shopify Admin API | Real publication on dev store |
-| Hosting | Vercel (frontend) · Railway (backend) | Fast deploys, public demo |
+| Frontend | Next.js 16 · React 19 · Tailwind v4 | Custom Mission Control aesthetic, no chrome library |
+| Backend | FastAPI · `sse-starlette` | Async orchestration + SSE that survives the Railway proxy |
+| Reasoning | **Gemini 2.5 Pro** (Vertex AI) | Streaming function calls + narrated reasoning |
+| Embeddings | `text-embedding-004` (768d, cosine) | Atlas Vector Search index `vector_index` |
+| Memory | **MongoDB Atlas + Atlas Vector Search** | Persistent operational memory; load-bearing, not decorative |
+| MCP | **mongodb-mcp-server** (stdio, Node) | MongoDB-track qualification |
+| Action layer | Shopify Admin API (custom app, `shpua_`) | Real draft products on a live dev store |
+| Hosting | Vercel (frontend) · Railway (backend) | Public deployment |
+
+## Run a mission
+
+### Public demo
+
+Open [helix-tau-two.vercel.app](https://helix-tau-two.vercel.app), type a brief like *"Portable RGB Desk Lamp for small apartments"*, click **Run mission**. Watch the timeline. The full cycle (recall → reason → publish → consolidate) completes in ~25–30 seconds and a real draft product appears in the Shopify admin.
+
+### Locally
+
+You need a `.env` with credentials (see `.env.example`). The Python venv lives at `.venv/`.
+
+```bash
+# one-time
+python -m venv .venv
+.venv/Scripts/activate     # or source .venv/bin/activate on Linux/Mac
+pip install -r requirements.txt
+cd frontend && npm install && cd ..
+
+# seed operational memory (synthetic historical launches)
+python -m seed.seed_memory
+
+# backend
+uvicorn backend.main:app --reload --port 8000
+
+# frontend (separate terminal)
+cd frontend && npm run dev
+```
+
+Run a single mission from the CLI (skips the UI):
+
+```bash
+python -m agent.run "Portable RGB Desk Lamp"
+```
+
+Switch to the MCP-backed memory path for the qualification demo:
+
+```bash
+# Windows PowerShell
+$env:HELIX_MEMORY_BACKEND="mcp"
+python -m agent.run "Floating Glass RGB Shelf Lamp"
+```
+
+Smoke scripts under `scripts/` validate each external dependency in isolation: `smoke_gemini.py`, `smoke_mongo.py`, `smoke_shopify.py`, `smoke_memory.py`, `probe_mcp.py`.
+
+## Deployment
+
+Backend → Railway (Nixpacks Python builder, `mongodb-mcp-server` not deployed). Frontend → Vercel (Next.js 16 static build, `NEXT_PUBLIC_BACKEND_URL` baked at build time). Full step-by-step including env vars, GCP service-account injection, SSE proxy headers, and CORS in [`docs/deploy.md`](./docs/deploy.md).
+
+## Repo layout
+
+```text
+helix/
+├── frontend/           Next.js 16 — Mission Control UI
+│   ├── src/app/        page.tsx, globals.css, layout.tsx
+│   ├── src/lib/        api.ts (SSE client), highlight.ts (memory-ref highlights)
+│   └── scripts/        smoke-highlight.ts (unit smoke for the regex layer)
+├── backend/            FastAPI — /api/missions, /api/memory, SSE stream
+├── agent/              Gemini function-calling loop
+│   ├── mission.py      Mission orchestration + streaming emit
+│   ├── tools.py        recall / publish / save (Gemini-facing signatures)
+│   ├── memory.py       Direct backend (pymongo) + factory
+│   ├── memory_mcp.py   MCP backend (stdio + persistent session)
+│   └── run.py          CLI runner
+├── seed/               Synthetic historical launches + seeding script
+├── scripts/            Smoke tests + probes
+├── docs/
+│   ├── deploy.md       Railway + Vercel deployment guide
+│   └── mcp.md          MongoDB MCP integration + measured latency
+├── requirements.txt    Python deps (root, used by Railway)
+├── nixpacks.toml       Railway build (explicit Python, prevents Next auto-detect)
+├── Procfile            web: uvicorn backend.main:app
+├── railway.json        Healthcheck + start command
+└── .env.example        Required credentials reference
+```
 
 ## Hackathon
 
-Helix is being built for the [Google Cloud Rapid Agent Hackathon](https://cloud.google.com/) — **MongoDB track**.
+[Google Cloud Rapid Agent Hackathon](https://cloud.google.com/) — **MongoDB track**. Deadline 2026-06-11.
 
-- **Deadline:** June 11, 2026
-- **Track:** MongoDB
-- **Prize tier targeted:** Podium (1st – $5,000 / 2nd – $3,000 / 3rd – $2,000)
+Qualification requires Gemini + a partner MCP server. Helix runs Gemini 2.5 Pro on Vertex AI and integrates the official MongoDB MCP server as the operational-memory transport (see [`docs/mcp.md`](./docs/mcp.md)).
 
-Submission requires Gemini 3 + Agent Builder + a partner MCP server. Helix uses MongoDB MCP as its memory access layer.
+## License
 
-## Project Structure
-
-```
-helix/
-├── frontend/        Next.js 15 — Mission Control UI
-├── backend/         FastAPI — orchestration layer
-├── agent/           Vertex Agent Builder definitions + tools
-├── seed/            Synthetic operational history (30 launches w/ embeddings)
-├── scripts/         Smoke tests (smoke_shopify, smoke_mongo, smoke_gemini)
-├── docs/            Architecture notes, demo script, judging rubric mapping
-├── .env.example     All credentials required
-├── LICENSE          MIT
-└── README.md        You are here
-```
-
-## Roadmap
-
-### Phase 1 — Foundations (Days 1–3)
-- [ ] Provisioning: Google Cloud, MongoDB Atlas, Shopify dev store
-- [ ] Smoke tests green: Shopify publish, Mongo vector search, Gemini grounding
-- [ ] First end-to-end vertical slice: prompt → agent → published product
-
-### Phase 2 — The Agent (Days 4–10)
-- [ ] All 5 stages of the Mission Loop wired
-- [ ] MongoDB MCP server integrated as agent tool
-- [ ] Seed data: 30 synthetic historical launches with embeddings
-- [ ] Vector search retrieval visibly informing decisions
-
-### Phase 3 — Mission Control UI (Days 11–22)
-- [ ] Timeline-first layout, change-stream-driven
-- [ ] Reasoning panel, retrieved memory panel, product preview
-- [ ] Animation pass: feels cinematic, not "loading…"
-
-### Phase 4 — Demo polish (Days 23–33)
-- [ ] Demo script + 3-minute video
-- [ ] Architecture deep-dive documentation
-- [ ] Public deployment hardening
-
-### Phase 5 — Submission (Days 34–35)
-- [ ] Devpost submission
-- [ ] Final repo audit (license, README, deploy URL)
-
-## Status
-
-**Current phase:** Phase 1 — Foundations
-**Last updated:** 2026-05-08
+MIT — see [`LICENSE`](./LICENSE).
 
 ---
 
-<sub>Built by [Roberto Llanos](https://github.com/) · Powered by Google Cloud · Memory by MongoDB</sub>
+<sub>Built by [Roberto Llanos](https://github.com/beto-llanos) · Reasoning by Gemini · Memory by MongoDB · Action by Shopify</sub>
