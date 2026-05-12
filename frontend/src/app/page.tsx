@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import {
   listMissions,
   getMission,
@@ -12,13 +19,18 @@ import {
   type MissionEvent,
   type MemoryDoc,
 } from "@/lib/api";
+import {
+  buildHighlighter,
+  collectMentionedIds,
+  splitHighlights,
+  type Highlighter,
+} from "@/lib/highlight";
 
 type ToolCallPayload = { name: string; args: Record<string, unknown> };
 type ToolResultPayload = { name: string; result: unknown };
 type ReasoningPayload = { turn?: number; text: string };
 type ReasoningDeltaPayload = { block_id: string; turn?: number; text: string };
 
-// Categorize tools for color coding
 type ToolCategory = "memory" | "commerce" | "analytics";
 const TOOL_CATEGORY: Record<string, ToolCategory> = {
   recall_similar_launches: "memory",
@@ -31,8 +43,10 @@ const CATEGORY_COLOR: Record<ToolCategory, { dot: string; label: string }> = {
   analytics: { dot: "bg-amber-400", label: "text-amber-400" },
 };
 
-// Collapsed event for rendering: reasoning_delta events with the same block_id
-// fold into one entry showing the latest accumulated text.
+// Display-only stale threshold for missions stuck in "running" — used to avoid
+// stale teal dots polluting the sidebar during a demo.
+const STALE_MISSION_MS = 10 * 60 * 1000;
+
 type RenderItem =
   | { kind: "mission_start"; at: string }
   | { kind: "reasoning"; at: string; text: string; streaming?: boolean }
@@ -90,8 +104,21 @@ export default function MissionControl() {
   const [memory, setMemory] = useState<MemoryDoc[]>([]);
   const [brief, setBrief] = useState("");
   const [starting, setStarting] = useState(false);
+  const [hoveredMemoryId, setHoveredMemoryId] = useState<string | null>(null);
+  // Map of memoryId → mount key (ts). Bumping the key remounts the card with
+  // the pulse animation re-fired. We clear entries 1.2s after mount.
+  const [pulses, setPulses] = useState<Record<string, number>>({});
   const evtRef = useRef<EventSource | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const seenMentionsRef = useRef<Set<string>>(new Set());
+  // Stale-mission ticker: refreshes "now" every 30s so the sidebar can age
+  // running dots into "stalled" without waiting for another fetch. Held in
+  // state (not derived from Date.now() at render) to satisfy purity rules.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const refreshMissions = useCallback(async () => {
     try {
@@ -110,13 +137,23 @@ export default function MissionControl() {
   }, []);
 
   useEffect(() => {
-    refreshMissions();
-    refreshMemory();
-  }, [refreshMissions, refreshMemory]);
+    // Initial fetch: setState happens in the .then callback (subscription
+    // pattern), not synchronously in the effect body.
+    listMissions().then(setMissions).catch(console.error);
+    listMemory().then(setMemory).catch(console.error);
+  }, []);
 
   useEffect(() => {
     if (!selectedId) return;
     let cancelled = false;
+
+    // Reset per-mission state so previous mission's highlights/pulses don't
+    // contaminate the new one. setState here is intentional — selectedId acts
+    // as the reset key for this synchronization effect.
+    seenMentionsRef.current = new Set();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPulses({});
+    setHoveredMemoryId(null);
 
     (async () => {
       try {
@@ -203,6 +240,15 @@ export default function MissionControl() {
     return Array.isArray(result) ? (result as MemoryDoc[]) : [];
   }, [mission]);
 
+  // The highlighter is built from the memory cards visible on the right. We
+  // fall back to the full memory list before the agent has recalled anything
+  // so that early reasoning still gets highlighted if it happens to mention a
+  // known launch (rare, but cheap to support).
+  const highlighter = useMemo<Highlighter | null>(
+    () => buildHighlighter(retrieved.length > 0 ? retrieved : memory),
+    [retrieved, memory],
+  );
+
   const shopify = useMemo(() => {
     if (!mission) return null;
     const ev = [...mission.events]
@@ -226,11 +272,50 @@ export default function MissionControl() {
     [mission],
   );
 
+  // After each render of the timeline, detect any memory ids newly mentioned
+  // in reasoning text and fire a 1.2s pulse on the corresponding cards.
+  useEffect(() => {
+    if (!highlighter) return;
+    const fresh: string[] = [];
+    for (const item of renderItems) {
+      if (item.kind !== "reasoning" || !item.text) continue;
+      for (const id of collectMentionedIds(item.text, highlighter)) {
+        if (!seenMentionsRef.current.has(id)) {
+          seenMentionsRef.current.add(id);
+          fresh.push(id);
+        }
+      }
+    }
+    if (fresh.length === 0) return;
+    const now = Date.now();
+    // Marking newly mentioned memory ids for the 1.2s pulse animation is a
+    // legitimate derived-from-stream side effect, not avoidable via useMemo
+    // because it triggers wall-clock timers.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPulses((cur) => {
+      const next = { ...cur };
+      for (const id of fresh) next[id] = now;
+      return next;
+    });
+    const timers = fresh.map((id) =>
+      window.setTimeout(() => {
+        setPulses((cur) => {
+          if (cur[id] !== now) return cur; // a newer pulse won
+          const next = { ...cur };
+          delete next[id];
+          return next;
+        });
+      }, 1200),
+    );
+    return () => {
+      for (const t of timers) window.clearTimeout(t);
+    };
+  }, [renderItems, highlighter]);
+
   // auto-scroll timeline as new items arrive
   useEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
-    // only auto-scroll if user is within 200px of the bottom (don't fight them)
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 250;
     if (nearBottom || mission?.status === "running") {
       requestAnimationFrame(() => {
@@ -239,7 +324,6 @@ export default function MissionControl() {
     }
   }, [renderItems.length, mission?.status, renderItems]);
 
-  // metrics (computed from missions list)
   const metrics = useMemo(() => {
     const complete = missions.filter((m) => m.status === "complete");
     const totalDur = complete.reduce((s, m) => s + (m.duration_s ?? 0), 0);
@@ -251,6 +335,10 @@ export default function MissionControl() {
       memory: memory.length,
     };
   }, [missions, memory]);
+
+  const onHoverMemory = useCallback((id: string | null) => {
+    setHoveredMemoryId(id);
+  }, []);
 
   return (
     <div className="grid h-screen grid-cols-[280px_1fr_400px] bg-[var(--bg-0)] text-[var(--fg)]">
@@ -280,47 +368,22 @@ export default function MissionControl() {
             </div>
           )}
           <ul className="space-y-1">
-            {missions.map((m) => {
-              const active = m._id === selectedId;
-              const running = m.status === "running";
-              return (
-                <li key={m._id}>
-                  <button
-                    onClick={() => setSelectedId(m._id)}
-                    className={`w-full rounded-md border px-3 py-2 text-left transition ${
-                      active
-                        ? "border-[var(--border)] bg-[var(--bg-2)]"
-                        : "border-transparent hover:border-[var(--border-soft)] hover:bg-[var(--bg-2)]"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <div
-                        className={`h-1.5 w-1.5 rounded-full ${
-                          running
-                            ? "bg-[var(--accent)] pulse-soft"
-                            : m.status === "complete"
-                              ? "bg-[var(--fg-dim)]"
-                              : "bg-[var(--warn)]"
-                        }`}
-                      />
-                      <div className="truncate text-[13px] font-medium">
-                        {m.brief}
-                      </div>
-                    </div>
-                    <div className="ml-3.5 mt-0.5 truncate font-mono text-[10px] text-[var(--fg-dim)]">
-                      {m._id}
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
+            {missions.map((m) => (
+              <li key={m._id}>
+                <MissionListItem
+                  mission={m}
+                  active={m._id === selectedId}
+                  nowMs={nowMs}
+                  onSelect={() => setSelectedId(m._id)}
+                />
+              </li>
+            ))}
           </ul>
         </div>
       </aside>
 
       {/* CENTER — TIMELINE */}
       <main className="flex h-screen flex-col">
-        {/* metrics bar */}
         <div className="grid grid-cols-4 border-b border-[var(--border)] bg-[var(--bg-1)]">
           <Metric label="Missions Run" value={String(metrics.total)} />
           <Metric label="Completed" value={String(metrics.complete)} />
@@ -331,7 +394,6 @@ export default function MissionControl() {
           <Metric label="Memory Entries" value={String(metrics.memory)} />
         </div>
 
-        {/* brief input */}
         <div className="border-b border-[var(--border)] bg-[var(--bg-1)] px-8 py-5">
           <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--fg-dim)]">
             New mission
@@ -357,7 +419,6 @@ export default function MissionControl() {
           </div>
         </div>
 
-        {/* timeline */}
         <div ref={timelineRef} className="flex-1 overflow-y-auto px-8 py-6">
           {!mission && (
             <div className="flex h-full items-center justify-center text-center">
@@ -400,7 +461,13 @@ export default function MissionControl() {
 
               <ol className="relative space-y-3 border-l border-[var(--border)] pl-6">
                 {renderItems.map((item, i) => (
-                  <TimelineRow key={`${item.kind}-${i}`} item={item} />
+                  <TimelineRow
+                    key={`${item.kind}-${i}`}
+                    item={item}
+                    highlighter={highlighter}
+                    hoveredMemoryId={hoveredMemoryId}
+                    onHoverMemory={onHoverMemory}
+                  />
                 ))}
                 {mission.status === "running" && (
                   <li className="relative -ml-6 flex items-center gap-3 pl-6">
@@ -440,6 +507,10 @@ export default function MissionControl() {
                     doc={doc}
                     score={(doc as MemoryDoc & { score?: number }).score}
                     highlight
+                    isHovered={hoveredMemoryId === doc._id}
+                    pulseKey={pulses[doc._id]}
+                    onHoverEnter={() => onHoverMemory(doc._id)}
+                    onHoverLeave={() => onHoverMemory(null)}
                   />
                 ))}
               </ul>
@@ -449,11 +520,24 @@ export default function MissionControl() {
               <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-[var(--fg-muted)]">
                 Memory ({memory.length})
               </div>
-              <ul className="space-y-2">
-                {memory.slice(0, 8).map((doc) => (
-                  <MemoryCard key={doc._id} doc={doc} />
-                ))}
-              </ul>
+              {memory.length === 0 ? (
+                <div className="px-1 py-4 text-center text-xs text-[var(--fg-dim)]">
+                  No memory yet.
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  {memory.slice(0, 8).map((doc) => (
+                    <MemoryCard
+                      key={doc._id}
+                      doc={doc}
+                      isHovered={hoveredMemoryId === doc._id}
+                      pulseKey={pulses[doc._id]}
+                      onHoverEnter={() => onHoverMemory(doc._id)}
+                      onHoverLeave={() => onHoverMemory(null)}
+                    />
+                  ))}
+                </ul>
+              )}
             </>
           )}
         </div>
@@ -507,7 +591,71 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TimelineRow({ item }: { item: RenderItem }) {
+function MissionListItem({
+  mission,
+  active,
+  nowMs,
+  onSelect,
+}: {
+  mission: MissionSummary;
+  active: boolean;
+  nowMs: number;
+  onSelect: () => void;
+}) {
+  const stale = useMemo(() => {
+    if (mission.status !== "running" || !mission.started_at) return false;
+    const startedMs = Date.parse(mission.started_at);
+    if (Number.isNaN(startedMs)) return false;
+    return nowMs - startedMs > STALE_MISSION_MS;
+  }, [mission.status, mission.started_at, nowMs]);
+
+  const running = mission.status === "running" && !stale;
+  const complete = mission.status === "complete";
+
+  const dotClass = stale
+    ? "bg-[var(--warn)]"
+    : running
+      ? "bg-[var(--accent)] pulse-soft"
+      : complete
+        ? "bg-[var(--fg-dim)]"
+        : "bg-[var(--warn)]";
+
+  return (
+    <button
+      onClick={onSelect}
+      className={`w-full rounded-md border px-3 py-2 text-left transition ${
+        active
+          ? "border-[var(--border)] bg-[var(--bg-2)]"
+          : "border-transparent hover:border-[var(--border-soft)] hover:bg-[var(--bg-2)]"
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <div className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
+        <div className="truncate text-[13px] font-medium">{mission.brief}</div>
+        {stale && (
+          <span className="ml-auto shrink-0 font-mono text-[9px] uppercase tracking-widest text-[var(--warn)]">
+            stalled
+          </span>
+        )}
+      </div>
+      <div className="ml-3.5 mt-0.5 truncate font-mono text-[10px] text-[var(--fg-dim)]">
+        {mission._id}
+      </div>
+    </button>
+  );
+}
+
+function TimelineRow({
+  item,
+  highlighter,
+  hoveredMemoryId,
+  onHoverMemory,
+}: {
+  item: RenderItem;
+  highlighter: Highlighter | null;
+  hoveredMemoryId: string | null;
+  onHoverMemory: (id: string | null) => void;
+}) {
   const time = item.at ? new Date(item.at).toLocaleTimeString() : "";
 
   if (item.kind === "mission_start") {
@@ -543,8 +691,15 @@ function TimelineRow({ item }: { item: RenderItem }) {
           )}
         </div>
         <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-[var(--fg)]">
-          {item.text}
-          {item.streaming && <span className="ml-0.5 inline-block h-[1em] w-[2px] -translate-y-[2px] bg-[var(--accent)] pulse-soft align-middle" />}
+          <HighlightedText
+            text={item.text}
+            highlighter={highlighter}
+            hoveredMemoryId={hoveredMemoryId}
+            onHoverMemory={onHoverMemory}
+          />
+          {item.streaming && (
+            <span className="ml-0.5 inline-block h-[1em] w-[2px] -translate-y-[2px] bg-[var(--accent)] pulse-soft align-middle" />
+          )}
         </p>
       </li>
     );
@@ -589,14 +744,65 @@ function TimelineRow({ item }: { item: RenderItem }) {
   return null;
 }
 
+function HighlightedText({
+  text,
+  highlighter,
+  hoveredMemoryId,
+  onHoverMemory,
+}: {
+  text: string;
+  highlighter: Highlighter | null;
+  hoveredMemoryId: string | null;
+  onHoverMemory: (id: string | null) => void;
+}) {
+  const segments = useMemo(
+    () => splitHighlights(text, highlighter),
+    [text, highlighter],
+  );
+
+  if (segments.length === 1 && !segments[0].memoryId) {
+    return <>{segments[0].text}</>;
+  }
+
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (!seg.memoryId) {
+          return <span key={i}>{seg.text}</span>;
+        }
+        const active = hoveredMemoryId === seg.memoryId;
+        return (
+          <span
+            key={i}
+            className={`mem-mark${active ? " mem-mark-active" : ""}`}
+            data-memory-id={seg.memoryId}
+            onMouseEnter={() => onHoverMemory(seg.memoryId!)}
+            onMouseLeave={() => onHoverMemory(null)}
+          >
+            {seg.text}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
 function MemoryCard({
   doc,
   score,
   highlight = false,
+  isHovered = false,
+  pulseKey,
+  onHoverEnter,
+  onHoverLeave,
 }: {
   doc: MemoryDoc;
   score?: number;
   highlight?: boolean;
+  isHovered?: boolean;
+  pulseKey?: number;
+  onHoverEnter?: (e: MouseEvent<HTMLLIElement>) => void;
+  onHoverLeave?: (e: MouseEvent<HTMLLIElement>) => void;
 }) {
   const outcomeColor =
     doc.outcome === "blockbuster"
@@ -607,13 +813,18 @@ function MemoryCard({
           ? "text-[var(--danger)]"
           : "text-[var(--fg-dim)]";
 
+  const baseBorder = highlight
+    ? "border-[var(--border)] bg-[var(--bg-2)]"
+    : "border-[var(--border-soft)] bg-[var(--bg-1)]";
+
   return (
     <li
-      className={`rounded-md border px-3 py-2 transition ${
-        highlight
-          ? "border-[var(--border)] bg-[var(--bg-2)]"
-          : "border-[var(--border-soft)] bg-[var(--bg-1)]"
-      }`}
+      data-memory-id={doc._id}
+      onMouseEnter={onHoverEnter}
+      onMouseLeave={onHoverLeave}
+      className={`rounded-md border px-3 py-2 transition ${baseBorder} ${
+        isHovered ? "mem-card-active" : ""
+      } ${pulseKey ? "pulse-once" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="truncate text-[13px] font-medium">{doc.product_name}</div>

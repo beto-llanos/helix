@@ -74,3 +74,37 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 .fade-in-up { animation: fade-in-up 220ms ease-out both; }
+
+/* Memory-reference highlight inside reasoning text. */
+.mem-mark {
+  background: rgba(129, 140, 248, 0.10);
+  border-bottom: 1px dashed rgba(129, 140, 248, 0.55);
+  padding: 0 0.12em;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.mem-mark:hover,
+.mem-mark-active {
+  background: rgba(94, 234, 212, 0.16);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Memory card bidirectional hover — triggered from either side. */
+.mem-card-active {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent-dim),
+    0 0 14px rgba(94, 234, 212, 0.20);
+}
+
+/* One-shot pulse fired when the agent first mentions a memory in reasoning. */
+@keyframes pulse-once {
+  0%   { box-shadow: 0 0 0 0 rgba(94, 234, 212, 0.55); }
+  40%  { box-shadow: 0 0 0 8px rgba(94, 234, 212, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(94, 234, 212, 0); }
+}
+/* No fill-mode: after the 1.2s pulse ends, the element returns to its base
+   style so an active hover state (mem-card-active) can show its own shadow. */
+.pulse-once { animation: pulse-once 1.2s ease-out; }
