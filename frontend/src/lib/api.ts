@@ -49,7 +49,40 @@ export async function listMissions(): Promise<MissionSummary[]> {
 export async function getMission(id: string): Promise<Mission> {
   const r = await fetch(`${BASE}/api/missions/${id}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getMission ${r.status}`);
-  return r.json();
+  const raw = (await r.json()) as Mission & { steps?: LegacyStep[] };
+  return { ...raw, events: normalizeEvents(raw) };
+}
+
+/**
+ * Pre-streaming missions persist a `steps[]` array instead of `events[]`. We
+ * fold those into the event timeline so old missions still render. New
+ * missions arrive with `events` already populated and pass through untouched.
+ */
+type LegacyStep = {
+  turn?: number;
+  type?: string;
+  name?: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+  text?: string;
+};
+
+function normalizeEvents(raw: { events?: MissionEvent[]; steps?: LegacyStep[]; started_at?: string }): MissionEvent[] {
+  if (Array.isArray(raw.events) && raw.events.length > 0) return raw.events;
+  if (!Array.isArray(raw.steps)) return [];
+  const at = raw.started_at ?? new Date(0).toISOString();
+  const out: MissionEvent[] = [];
+  for (const s of raw.steps) {
+    if (s.type === "reasoning" && typeof s.text === "string") {
+      out.push({ kind: "reasoning", payload: { text: s.text, turn: s.turn }, at });
+    } else if (s.type === "tool_call" && typeof s.name === "string") {
+      out.push({ kind: "tool_call", payload: { name: s.name, args: s.args ?? {} }, at });
+      if (s.result !== undefined) {
+        out.push({ kind: "tool_result", payload: { name: s.name, result: s.result }, at });
+      }
+    }
+  }
+  return out;
 }
 
 export async function listMemory(): Promise<MemoryDoc[]> {
